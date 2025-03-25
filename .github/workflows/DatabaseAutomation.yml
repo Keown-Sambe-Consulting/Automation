@@ -4,32 +4,98 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:  # Allow manual triggering
+
+env:
+  SQL_SCRIPTS_PATH: "./sql-scripts"  # Path to your SQL scripts
+  DATABASE_NAME: "YourDatabaseName"  # Default database name
 
 jobs:
   setup-database:
     runs-on: windows-latest
+    timeout-minutes: 15  # Prevent hanging jobs
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # Get full git history if needed
 
-      - name: Install SQL Server Command Line Tools (sqlcmd)
+      - name: Install SQL Tools
+        shell: powershell
         run: |
-          # Install Microsoft ODBC Driver 17 for SQL Server
-          Invoke-WebRequest -Uri https://aka.ms/downloadmsodbcsql -OutFile msodbc.msi
-          Start-Process msiexec.exe -ArgumentList "/i", "msodbc.msi", "/quiet", "/norestart" -NoNewWindow -Wait
-          Remove-Item msodbc.msi -Force
+          # Check if sqlcmd already exists
+          if (Get-Command sqlcmd -ErrorAction SilentlyContinue) {
+              Write-Host "sqlcmd already installed"
+              exit 0
+          }
 
-          # Install SQLCMD tools
-          Invoke-WebRequest -Uri https://aka.ms/sqlcmdline -OutFile sqlcmd.msi
-          Start-Process msiexec.exe -ArgumentList "/i", "sqlcmd.msi", "/quiet", "/norestart" -NoNewWindow -Wait
-          Remove-Item sqlcmd.msi -Force
+          # Install prerequisites
+          Write-Host "Installing ODBC Driver and SQLCMD..."
+          try {
+              $ProgressPreference = 'SilentlyContinue'
+              Invoke-WebRequest -Uri "https://aka.ms/install-azdata-ps" -OutFile "install-azdata.ps1"
+              .\install-azdata.ps1 -AcceptLicense -InstallPath "$env:ProgramFiles\Microsoft SQL Tools"
+              $env:Path += ";$env:ProgramFiles\Microsoft SQL Tools"
+              [Environment]::SetEnvironmentVariable("Path", $env:Path, [EnvironmentVariableTarget]::Machine)
+          }
+          catch {
+              Write-Error "Installation failed: $_"
+              exit 1
+          }
 
-      - name: Test Connection to SQL Server
+      - name: Validate SQL Connection
+        shell: powershell
         env:
-          SERVER: ${{ secrets.SERVER }}  # Use comma instead of colon for port
-          DB_USER: ${{ secrets.DB_USER }}
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          SQL_SERVER: ${{ secrets.SQL_SERVER }}
+          SQL_USER: ${{ secrets.SQL_USER }}
+          SQL_PASSWORD: ${{ secrets.SQL_PASSWORD }}
         run: |
-          # Running sqlcmd to test connection
-          sqlcmd -S $env:SERVER -U $env:DB_USER -P $env:DB_PASSWORD -Q "SELECT @@VERSION"
+          try {
+              $connectionTest = sqlcmd -S "$env:SQL_SERVER" -U "$env:SQL_USER" -P "$env:SQL_PASSWORD" -Q "SELECT @@VERSION" -b -o output.txt
+              if ($LASTEXITCODE -ne 0) {
+                  Get-Content output.txt
+                  throw "Connection test failed"
+              }
+              Write-Host "SQL Server version:"
+              Get-Content output.txt
+              Remove-Item output.txt -ErrorAction SilentlyContinue
+          }
+          catch {
+              Write-Error "SQL Connection failed: $_"
+              exit 1
+          }
+
+      - name: Execute SQL Scripts
+        shell: powershell
+        env:
+          SQL_SERVER: ${{ secrets.SQL_SERVER }}
+          SQL_USER: ${{ secrets.SQL_USER }}
+          SQL_PASSWORD: ${{ secrets.SQL_PASSWORD }}
+        run: |
+          # Execute scripts in order
+          $scripts = Get-ChildItem -Path "$env:SQL_SCRIPTS_PATH\*.sql" | Sort-Object Name
+          
+          foreach ($script in $scripts) {
+              Write-Host "Executing $($script.Name)..."
+              sqlcmd -S "$env:SQL_SERVER" -d "$env:DATABASE_NAME" -U "$env:SQL_USER" -P "$env:SQL_PASSWORD" -i "$($script.FullName)" -b -o "$($script.Name).log"
+              
+              if ($LASTEXITCODE -ne 0) {
+                  Write-Host "Error output:"
+                  Get-Content "$($script.Name).log"
+                  exit 1
+              }
+              
+              Remove-Item "$($script.Name).log" -ErrorAction SilentlyContinue
+              Write-Host "$($script.Name) executed successfully"
+          }
+
+      - name: Post-Deployment Verification
+        shell: powershell
+        env:
+          SQL_SERVER: ${{ secrets.SQL_SERVER }}
+          SQL_USER: ${{ secrets.SQL_USER }}
+          SQL_PASSWORD: ${{ secrets.SQL_PASSWORD }}
+        run: |
+          $tables = sqlcmd -S "$env:SQL_SERVER" -d "$env:DATABASE_NAME" -U "$env:SQL_USER" -P "$env:SQL_PASSWORD" -Q "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES" -h -1 -W
+          Write-Host "Database contains $tables tables"
