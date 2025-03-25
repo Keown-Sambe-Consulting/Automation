@@ -15,7 +15,12 @@ jobs:
 
       - name: Install SQL Server Command Line Tools (sqlcmd)
         run: |
-          # Download and install SQL Server tools for Windows (Use the latest supported version)
+          # Install Microsoft ODBC Driver 17 for SQL Server
+          Invoke-WebRequest -Uri https://aka.ms/downloadmsodbcsql -OutFile msodbc.msi
+          Start-Process msiexec.exe -ArgumentList "/i", "msodbc.msi", "/quiet", "/norestart" -NoNewWindow -Wait
+          Remove-Item msodbc.msi -Force
+
+          # Install SQLCMD tools
           Invoke-WebRequest -Uri https://aka.ms/sqlcmdline -OutFile sqlcmd.msi
           Start-Process msiexec.exe -ArgumentList "/i", "sqlcmd.msi", "/quiet", "/norestart" -NoNewWindow -Wait
           Remove-Item sqlcmd.msi -Force
