@@ -4,98 +4,70 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch:  # Allow manual triggering
-
-env:
-  SQL_SCRIPTS_PATH: "./sql-scripts"  # Path to your SQL scripts
-  DATABASE_NAME: "YourDatabaseName"  # Default database name
 
 jobs:
   setup-database:
     runs-on: windows-latest
-    timeout-minutes: 15  # Prevent hanging jobs
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
-        with:
-          fetch-depth: 0  # Get full git history if needed
 
-      - name: Install SQL Tools
+      - name: Install SQL Server Command Line Tools
         shell: powershell
         run: |
-          # Check if sqlcmd already exists
-          if (Get-Command sqlcmd -ErrorAction SilentlyContinue) {
-              Write-Host "sqlcmd already installed"
-              exit 0
-          }
-
-          # Install prerequisites
-          Write-Host "Installing ODBC Driver and SQLCMD..."
+          # Install ODBC Driver
           try {
-              $ProgressPreference = 'SilentlyContinue'
-              Invoke-WebRequest -Uri "https://aka.ms/install-azdata-ps" -OutFile "install-azdata.ps1"
-              .\install-azdata.ps1 -AcceptLicense -InstallPath "$env:ProgramFiles\Microsoft SQL Tools"
-              $env:Path += ";$env:ProgramFiles\Microsoft SQL Tools"
-              [Environment]::SetEnvironmentVariable("Path", $env:Path, [EnvironmentVariableTarget]::Machine)
-          }
-          catch {
-              Write-Error "Installation failed: $_"
+              Write-Host "Installing ODBC Driver..."
+              $odbcUrl = "https://aka.ms/downloadmsodbcsql"
+              $odbcInstaller = "$env:TEMP\msodbc.msi"
+              Invoke-WebRequest -Uri $odbcUrl -OutFile $odbcInstaller
+              Start-Process -Wait -FilePath "msiexec.exe" -ArgumentList "/i", $odbcInstaller, "/quiet", "/norestart"
+              Remove-Item $odbcInstaller -Force
+          } catch {
+              Write-Host "::error::ODBC Driver installation failed: $_"
               exit 1
           }
 
-      - name: Validate SQL Connection
+          # Install SQLCMD
+          try {
+              Write-Host "Installing SQLCMD..."
+              $sqlcmdUrl = "https://aka.ms/sqlcmdline"
+              $sqlcmdInstaller = "$env:TEMP\sqlcmd.msi"
+              Invoke-WebRequest -Uri $sqlcmdUrl -OutFile $sqlcmdInstaller
+              Start-Process -Wait -FilePath "msiexec.exe" -ArgumentList "/i", $sqlcmdInstaller, "/quiet", "/norestart"
+              Remove-Item $sqlcmdInstaller -Force
+          } catch {
+              Write-Host "::error::SQLCMD installation failed: $_"
+              exit 1
+          }
+
+      - name: Test SQL Server Connection
         shell: powershell
         env:
-          SQL_SERVER: ${{ secrets.SQL_SERVER }}
-          SQL_USER: ${{ secrets.SQL_USER }}
-          SQL_PASSWORD: ${{ secrets.SQL_PASSWORD }}
+          SERVER: ${{ secrets.SERVER }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
         run: |
           try {
-              $connectionTest = sqlcmd -S "$env:SQL_SERVER" -U "$env:SQL_USER" -P "$env:SQL_PASSWORD" -Q "SELECT @@VERSION" -b -o output.txt
+              Write-Host "Attempting to connect to: $env:SERVER"
+              Write-Host "Using username: $env:DB_USER"
+              
+              # Test basic connection
+              $result = sqlcmd -S "$env:SERVER" -U "$env:DB_USER" -P "$env:DB_PASSWORD" -Q "SELECT @@VERSION" -b
+              
               if ($LASTEXITCODE -ne 0) {
-                  Get-Content output.txt
-                  throw "Connection test failed"
+                  throw "Connection failed with exit code $LASTEXITCODE"
               }
+              
+              Write-Host "Connection successful!"
               Write-Host "SQL Server version:"
-              Get-Content output.txt
-              Remove-Item output.txt -ErrorAction SilentlyContinue
-          }
-          catch {
-              Write-Error "SQL Connection failed: $_"
+              Write-Host $result
+          } catch {
+              Write-Host "::error::Connection test failed: $_"
+              Write-Host "Troubleshooting tips:"
+              Write-Host "1. Verify SERVER format: 'server,port' or 'server\instance'"
+              Write-Host "2. Check firewall rules allow GitHub Actions IPs"
+              Write-Host "3. Validate credentials in GitHub Secrets"
               exit 1
           }
-
-      - name: Execute SQL Scripts
-        shell: powershell
-        env:
-          SQL_SERVER: ${{ secrets.SQL_SERVER }}
-          SQL_USER: ${{ secrets.SQL_USER }}
-          SQL_PASSWORD: ${{ secrets.SQL_PASSWORD }}
-        run: |
-          # Execute scripts in order
-          $scripts = Get-ChildItem -Path "$env:SQL_SCRIPTS_PATH\*.sql" | Sort-Object Name
-          
-          foreach ($script in $scripts) {
-              Write-Host "Executing $($script.Name)..."
-              sqlcmd -S "$env:SQL_SERVER" -d "$env:DATABASE_NAME" -U "$env:SQL_USER" -P "$env:SQL_PASSWORD" -i "$($script.FullName)" -b -o "$($script.Name).log"
-              
-              if ($LASTEXITCODE -ne 0) {
-                  Write-Host "Error output:"
-                  Get-Content "$($script.Name).log"
-                  exit 1
-              }
-              
-              Remove-Item "$($script.Name).log" -ErrorAction SilentlyContinue
-              Write-Host "$($script.Name) executed successfully"
-          }
-
-      - name: Post-Deployment Verification
-        shell: powershell
-        env:
-          SQL_SERVER: ${{ secrets.SQL_SERVER }}
-          SQL_USER: ${{ secrets.SQL_USER }}
-          SQL_PASSWORD: ${{ secrets.SQL_PASSWORD }}
-        run: |
-          $tables = sqlcmd -S "$env:SQL_SERVER" -d "$env:DATABASE_NAME" -U "$env:SQL_USER" -P "$env:SQL_PASSWORD" -Q "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES" -h -1 -W
-          Write-Host "Database contains $tables tables"
