@@ -7,27 +7,17 @@ on:
 
 jobs:
   setup-database:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Install SQL Server client
+      - name: Install SQL Server client tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y curl apt-transport-https
-          curl -sSL https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc > /dev/null
-          echo "deb [arch=amd64] https://packages.microsoft.com/ubuntu/22.04/prod jammy main" | sudo tee /etc/apt/sources.list.d/mssql-release.list
-          sudo apt-get update
-          sudo apt-get install -y mssql-tools unixodbc-dev
-
-      - name: Ensure sqlcmd is available and set PATH
-        run: |
-          # Adding /opt/mssql-tools/bin to PATH for the current job run
-          export PATH="$PATH:/opt/mssql-tools/bin"
-          # Verifying sqlcmd is available
-          which sqlcmd
+          # Download and install SQL Server tools for Windows
+          Invoke-WebRequest -Uri https://aka.ms/sqlcmdline/rhel -OutFile sqlcmd.msi
+          Start-Process msiexec.exe -ArgumentList "/i", "sqlcmd.msi", "/quiet", "/norestart" -NoNewWindow -Wait
 
       - name: Test Connection to SQL Server
         env:
@@ -35,5 +25,5 @@ jobs:
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
         run: |
-          # Now sqlcmd should be available
-          sqlcmd -S $SERVER -U $DB_USER -P $DB_PASSWORD -Q "SELECT @@VERSION"
+          # Running sqlcmd to test connection
+          sqlcmd -S $env:SERVER -U $env:DB_USER -P $env:DB_PASSWORD -Q "SELECT @@VERSION"
