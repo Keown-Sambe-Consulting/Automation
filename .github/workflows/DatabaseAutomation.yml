@@ -8,66 +8,55 @@ on:
 jobs:
   setup-database:
     runs-on: windows-latest
+    timeout-minutes: 10  # Increase overall timeout
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Install SQL Server Command Line Tools
+      - name: Install SQL Tools
         shell: powershell
         run: |
-          # Install ODBC Driver
-          try {
-              Write-Host "Installing ODBC Driver..."
-              $odbcUrl = "https://aka.ms/downloadmsodbcsql"
-              $odbcInstaller = "$env:TEMP\msodbc.msi"
-              Invoke-WebRequest -Uri $odbcUrl -OutFile $odbcInstaller
-              Start-Process -Wait -FilePath "msiexec.exe" -ArgumentList "/i", $odbcInstaller, "/quiet", "/norestart"
-              Remove-Item $odbcInstaller -Force
-          } catch {
-              Write-Host "::error::ODBC Driver installation failed: $_"
-              exit 1
-          }
+          # Install using Chocolatey (more reliable)
+          choco install sqlserver-cmdlineutils -y --no-progress
 
-          # Install SQLCMD
-          try {
-              Write-Host "Installing SQLCMD..."
-              $sqlcmdUrl = "https://aka.ms/sqlcmdline"
-              $sqlcmdInstaller = "$env:TEMP\sqlcmd.msi"
-              Invoke-WebRequest -Uri $sqlcmdUrl -OutFile $sqlcmdInstaller
-              Start-Process -Wait -FilePath "msiexec.exe" -ArgumentList "/i", $sqlcmdInstaller, "/quiet", "/norestart"
-              Remove-Item $sqlcmdInstaller -Force
-          } catch {
-              Write-Host "::error::SQLCMD installation failed: $_"
-              exit 1
-          }
-
-      - name: Test SQL Server Connection
+      - name: Test SQL Connection with Timeout
         shell: powershell
         env:
           SERVER: ${{ secrets.SERVER }}
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
         run: |
-          try {
-              Write-Host "Attempting to connect to: $env:SERVER"
-              Write-Host "Using username: $env:DB_USER"
-              
-              # Test basic connection
-              $result = sqlcmd -S "$env:SERVER" -U "$env:DB_USER" -P "$env:DB_PASSWORD" -Q "SELECT @@VERSION" -b
-              
-              if ($LASTEXITCODE -ne 0) {
-                  throw "Connection failed with exit code $LASTEXITCODE"
+          $retryCount = 0
+          $maxRetries = 3
+          $connectionTimeout = 30  # Seconds
+
+          while ($retryCount -lt $maxRetries) {
+              try {
+                  Write-Host "Attempt $($retryCount + 1) of $maxRetries - Waiting $connectionTimeout seconds for connection..."
+                  
+                  # Set connection timeout parameter
+                  $result = sqlcmd -S "$env:SERVER" -U "$env:DB_USER" -P "$env:DB_PASSWORD" `
+                                  -l $connectionTimeout `
+                                  -Q "SELECT 'Connection successful at ' + FORMAT(GETDATE(), 'HH:mm:ss') AS Result"
+                  
+                  if ($LASTEXITCODE -eq 0) {
+                      Write-Host $result
+                      Write-Host "Connection established successfully!"
+                      exit 0
+                  }
+                  else {
+                      throw "Connection failed with exit code $LASTEXITCODE"
+                  }
               }
-              
-              Write-Host "Connection successful!"
-              Write-Host "SQL Server version:"
-              Write-Host $result
-          } catch {
-              Write-Host "::error::Connection test failed: $_"
-              Write-Host "Troubleshooting tips:"
-              Write-Host "1. Verify SERVER format: 'server,port' or 'server\instance'"
-              Write-Host "2. Check firewall rules allow GitHub Actions IPs"
-              Write-Host "3. Validate credentials in GitHub Secrets"
-              exit 1
+              catch {
+                  Write-Host "::warning::Attempt failed: $_"
+                  $retryCount++
+                  if ($retryCount -lt $maxRetries) {
+                      Start-Sleep -Seconds 10  # Wait before retrying
+                  }
+              }
           }
+
+          Write-Host "::error::Failed to connect after $maxRetries attempts"
+          exit 1
